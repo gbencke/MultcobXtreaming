@@ -1,0 +1,154 @@
+# MultcobXtreaming
+
+# Problema
+
+A medida que a área de cobranca evolui e a Zanc necessita de maior agilidade na importação de carteiras de clientes para cobrança e sendo essas carteiras tendo cada vez mais cargas totais e nao incrementais, o sistema de CRM MultCob tem um desafio imenso na questão da escalabilidade dos seus processos de atualização e importação de carteiras.
+
+# Situacao Atual
+
+Atualmente o processo de importacao do Multcob eh executado atraves do programa MultcobADM de forma manual por um operador que deve clicar nele. 
+
+Dessa forma, existe poucas possibilidades em escalar esse processo, pois apenas podemos aumentar o poder computacional da maquina em que estamos trabalhando ( Escalabilidade Vertical) para fazer a importacao ser mais rapida.
+
+# Solucao
+
+A solucao que propomos eh simplesmente parar com o consumo das filas de importacao no MultcobADM e criar Servidores dedicados exclusivamente a execucao do MultcobWorker.exe tanto para consumo quanto processos de atualizacao de carteira (CobSinc).
+
+Cada processo de importacao de cada carteira podera ser configurado para usar o sistema novo (MultCobWorker rodando no Servidor) ou o sistema antigo (MultCobWorker Rodando Localmente)
+
+# Arquitetura Atual
+
+<< Diagrama de Arquitetura >>
+
+# Arquitetura Proposta
+
+<< Diagrama de Arquitetura >>
+
+1 Arquitetura por Site (POA, SAO, TK)
+
+# Impacto em Processos
+
+A principal mudanca para processos vai ser o uso de uma tela nova de acompanhamento aonde sera possivel visualizar as diversas filas de importacao e setar prioridades, essa tela se chama "Acompanhamento de MultCobXtreaming"
+
+# Acompanhamento de MultCobXtreaming
+
+<< Mockup da Tela Nova >>
+
+Fila, Tipo, NumWorkers, Workers Usados na Base, Clientes Consumidos, Clientes Pendentes, Velocidade,
+
+<Botao de Aumentar Prioridade>
+<Botao de Diminuir Prioridade>
+<Botao de Pausar>
+<Botao de Despausar>
+<Botao de Alocacao Workers por Base>
+<Botao de Limite Workers por Base por Horario>
+
+# Como operar a tela de Acompanhamento- #1
+
+<< Alocacao Workers >>
+
+# Alteracao na Tela de Processos
+
+<< Inclusao do Topico >>
+
+# Formacao de Fila
+
+A Formacao de Fila continua sendo um processo que pode ser rodado tanto no MultcobADM quando no proprio picotador, cada vez mais iremos incentivar que o proprio preprocessador / picotador inicie a formacao de fila.
+
+# Phase 2 Planejada
+
+Atualmente o Multcob funciona usando .NET 4.5.2, que apenas roda no windows, com o advento do .NET 5.0 que permite a execucao do codigo em linux, temos a intencao de migrar os MultcobWorker Farms direto para Linux de forma a aumentar a sua produção e diminuir o custo com servidores.
+
+Dessa forma, conseguiremos ainda mais workers em paralelo e todo o Backend do CRM estará rodando em Linux.
+
+=============================================
+# Parte Tecnica
+
+# Aspectos Tecnicos
+
+Apesar de ser uma mudanca radical para a area de processos, do ponto de vista tecnico, a maior parte das tecnologias e das tecnicas que iremos usar (Filas, API Python, MultcobWorker) ja sao amplamente usando nas APIs.
+
+# CobBO / MultcobWorker
+
+A principal mudanca na CobBo eh que o processo de importacao ira gravar o arquivo XML da Formacao de fila num topico do Kafka na operacao de FORMAR_FILA e na hora de IMPORTAR, ou seja, no consumo, ele ira receber por linha de comando os arquivos q ele deve consumir, juntamente com todas as informacoes necessarias.
+
+Dessa forma, de maneira concreta, nao se usara mais em nenhum momento a tabela fila_importacoes, so isso que sera alterado. 
+
+# Apache Kafka
+
+Como nao existira mais a tabela de fila de importacoes, iremos substituir essa tabela na realidade por filas no servidor Kafka, chamadas de "topicos". Esse 
+
+# MultcobGlobalCoordinator
+
+Sera criada uma API Global, unica por site que ira conter diversas funcionalidades, entre elas a coordenacao de workers, cache global e estado do CRM como um todo em relacao a todas as carteiras.
+
+Essa API sera implementada em Python com Flask, usando ORM SQLAlchemy e usando um banco de dados relacional para dados internos persistentes e um sistema REDIS interno para dados internos e de cache.
+
+# MultcobWorkerFarm
+
+Em cada servidor alocado para executar os MultcobWorkers sera executado um servico que na realidade sera apenas um script em python que ira acessar o MultcobGlobalCoordinator ( Estado Global do Site) para reportar o status dos workers e tambem pegar novas tarefas para seus workers
+
+# MultCobWorker -> Kafka (Formacao de Fila)
+
+Como falado anteriormente, o processo de formacao de fila nao ira mais gravar o XML a ser importado na tabela filas_importacao, mas, sim, dentro de um topico no Kafka no seguinte formato:
+
+<<BASE>>.<<CODCONVENIO>>.IMPORTACAO.<<NOME_PROCESSO>>
+
+Exemplos:
+
+MULTCOB03.1189.IMPORTACAO.ATUALIZA_BUREAU
+MULTCOB09.1186.IMPORTACAO.BAIXA_SQL
+MULTCOB02.1186.IMPORTACAO.MAILING_PORTO_NOVO
+
+Importante salientar que 1 mensagem apenas para cada CPF.
+
+# CobSinc -> Kafka
+
+Da mesma forma que a importacao, o servico CobSinc ira gravar as requisicoes no Kafka e nao mais chamando diretamento os MultcobWorker.
+
+Sera usado o seguinte formato:
+
+<<BASE>>.<<CODCONVENIO>>.COBSINC.<<OPERACAO>>
+
+Exemplos:
+
+MULTCOB03.1189.COBSINC.ATRASA_ACORDO
+MULTCOB09.1186.COBSINC.ATUALIZA_DIVIDA
+MULTCOB02.1186.COBSINC.LOCALIZACAO
+
+# Kafka -> MultcobGlobalCoordinator
+
+O Servico / API MultcobGlobalCoordinator ira consultar todos os topicos disponiveis no Kafka e registrar eles para escutar seus eventos. Dessa forma, ira receber de forma assincrona todos os eventos q serao populados pela Formacao de Fila e pelo CobSinc.
+
+# MultcobWorkerFarm -> MultcobGlobalCoordinator
+
+O Servico MultcobWorkerFarm instalado em cada um dos servidores de importacao sera responsavel por:
+
+1) Informar em tempo periodo atraves de uma chamada REST, uma lista de todos os workers sendo executados naquele servidor e seu status tanto de execucao quanto de saida, de forma a informar o MultcobGlobalCoordinator o status de cada um desse worker.
+2) Solicitar via API REST qual é a proxima tarefa para cada um dos workers a ser executada.
+3) Verificar o timeout de cada um dos workers e informar como erro se o worker falhou em reportar status a tempo e/ou morreu inesperadamente.
+
+Importar salientar que como existira diversas requisicoes simultaneas, o MultcobGlobalCoordinator precisara de um sistema de semaforos para realizar transacoes sincronas e manter o estado interno de cada worker e tarefa.
+
+# MultcobGlobalCoordinator -> Kafka
+
+Ao receber o status de cada worker o MultcobGlobalCoordinator ira gravar num topico do Kafka o retorno de cada uma das tarefas no seguinte formato:
+
+<<TOPICO_ORIGINAL>>.ACK
+
+Exemplos:
+MULTCOB03.1189.IMPORTACAO.ATUALIZA_BUREAU.ACK
+MULTCOB09.1186.IMPORTACAO.BAIXA_SQL.ACK
+MULTCOB02.1186.IMPORTACAO.MAILING_PORTO_NOVO.ACK
+MULTCOB03.1189.COBSINC.ATRASA_ACORDO.ACK
+MULTCOB09.1186.COBSINC.ATUALIZA_DIVIDA.ACK
+MULTCOB02.1186.COBSINC.LOCALIZACAO.ACK
+
+# MultcobADM -> MultcobGlobalCoordinator
+
+A Tela de Acompanhamento de MultCobXtreaming ira fazer a consulta do status de execucao atraves de uma consulta rest ao MultcobGlobalCoordinator.
+
+O MultcobADM tambem sera responsavel por configurar / alterar as prioridades e pausar / retomar o consumo das filas usando chamadas REST da API do MultcobGlobalCoordinator.
+
+
+
